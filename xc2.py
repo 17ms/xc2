@@ -4,7 +4,6 @@ import argparse
 import os
 import sys
 import time
-import urllib.parse
 from dotenv import load_dotenv
 import requests
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
+from json import JSONDecodeError
 import os
 import sys
 import time
@@ -20,6 +22,7 @@ LIKE_ENDPOINT = "https://twitter.com/i/api/graphql/lI07N6Otwv1PhnEgXILM7A/Favori
 REPOST_ENDPOINT = "https://twitter.com/i/api/graphql/ojPdsZsimiJrUGLR1sjUtA/CreateRetweet"
 DELETE_ENDPOINT = "https://twitter.com/i/api/graphql/VaenaVgh5q5ih7kvyVjgtg/DeleteTweet"
 USER_ENDPOINT = "https://twitter.com/i/api/graphql/_pnlqeTOtnpbIL9o-fS_pg/ProfileSpotlightsQuery"
+CLAIMS_ENDPOINT = "https://twitter.com/i/api/graphql/lFi3xnx0auUUnyG4YwpCNw/GetUserClaims"
 FOLLOW_ENDPOINT = "https://twitter.com/i/api/1.1/friendships/create.json"
 UNFOLLOW_ENDPOINT = "https://twitter.com/i/api/1.1/friendships/destroy.json"
 UPLOAD_ENDPOINT = "https://upload.twitter.com/1.1/media/upload.json"
@@ -32,10 +35,19 @@ AGENT = {
     "accept": "application/json",
 }
 
+STORE_PATH_PREFIX = "./data/"
+
 
 def main():
-    session = requests.Session()
-    headers = auth(session)
+    restored = try_restore()
+
+    if restored is None:
+        print("[+] No valid session found, creating new one...")
+        session = requests.Session()
+        headers = auth(session)
+    else:
+        print("[+] Restored valid session from the disk")
+        session, headers = restored
 
     if args.post is not None:
         media_id = upload(session, headers, args.media) if args.media is not None else None
@@ -67,6 +79,14 @@ def parse_args():
 
 
 def auth(session):
+    """
+    Authenticates a session with Twitter and returns headers for further requests.
+
+    :param requests.Session() session: session to use
+
+    :returns:
+        - headers (dict) - headers to use
+    """
     print("[+] Authenticating...")
 
     guest_token = guest(session)
@@ -76,12 +96,20 @@ def auth(session):
     print(f"[+] Authenticated as '{subtask_res['subtasks'][0]['open_account']['user']['screen_name']}'")
 
     ct0(session, headers)
+    persist(session, headers)
 
     return headers
 
 
 def guest(session):
-    # Fetch guest token (/guest/activate.json)
+    """
+    Fetches a guest token from `/guest/activate.json` and returns it.
+
+    :param requests.Session() session: session to use
+
+    :returns:
+        - guest_token (str) - guest token to use
+    """
     res = session.post(ACTIVATION_ENDPOINT, headers=AGENT, timeout=3)
     guest_token = res.json()["guest_token"]
 
@@ -89,7 +117,16 @@ def guest(session):
 
 
 def flow(session, guest_token):
-    # Fetch flow token (/onboarding/task.json?flow_name=login)
+    """
+    Fetches a flow token from `/onboarding/task.json?flow_name=login` and returns it.
+
+    :param requests.Session() session: session to use
+    :param str guest_token: guest token to use
+
+    :returns:
+        - headers (dict) - headers to use
+        - flow_token (str) - flow token to use
+    """
     headers = AGENT | {"x-guest-token": guest_token}
     res = session.post(LOGIN_ENDPOINT, headers=headers, timeout=3)
     flow_token = res.json()["flow_token"]
@@ -98,7 +135,16 @@ def flow(session, guest_token):
 
 
 def subtasks(session, headers, flow_token):
-    # Perform subtasks (/onboarding/task.json)
+    """
+    Performs subtasks in `/onboarding/task.json` and returns the responses.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str flow_token: flow token to use
+
+    :returns:
+        - res_json (dict) - response from the last subtask
+    """
     credentials = {
         "email": os.getenv("EMAIL"),
         "password": os.getenv("PASSWORD"),
@@ -161,13 +207,24 @@ def subtasks(session, headers, flow_token):
 
 
 def ct0(session, headers):
-    # Fetch ct0 cookie (/i/api/graphql/93NdfGgZRSyQ-6rmHPgdNg/Viewer)
+    """
+    Fetches ct0 cookie from `/i/api/graphql/93NdfGgZRSyQ-6rmHPgdNg/Viewer` and updates headers with it.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    """
     _res = session.get(VIEWER_ENDPOINT, headers=headers, timeout=3)
     headers["x-csrf-token"] = session.cookies.get_dict()["ct0"]
 
 
 def post(session, headers, media_id):
-    # Create new post (/i/api/graphql/SoVnbfCycZ7fERGCwpZkYA/CreateTweet)
+    """
+    Creates a new post with a text and an optional media attachment in `/i/api/graphql/SoVnbfCycZ7fERGCwpZkYA/CreateTweet`.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str media_id: media ID to attach to a post
+    """
     req_body = {
         "features": {
             "freedom_of_speech_not_reach_fetch_enabled": True,
@@ -212,7 +269,16 @@ def post(session, headers, media_id):
 
 
 def upload(session, headers, path):
-    # Upload media (/1.1/media/upload.json)
+    """
+    Uploads a media file to `/1.1/media/upload.json`.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str path: path to the media file
+
+    :returns:
+        - media_id (str) - media ID
+    """
     print(f"[+] Uploading file '{path}'")
 
     media_id, total_bytes = initialize_upload(session, headers, path)
@@ -223,7 +289,16 @@ def upload(session, headers, path):
 
 
 def initialize_upload(session, headers, path):
-    # Initialize upload and fetch media ID (/i/media/upload.json?command=INIT)
+    """
+    Initializes upload of a media file to `/1.1/media/upload.json`.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str path: path to the media file
+
+    :returns:
+        - media_id (str) - media ID
+    """
     total_bytes = os.path.getsize(path)
     ext = path.split(".")[-1]
     media_type, category = (
@@ -247,7 +322,14 @@ def initialize_upload(session, headers, path):
 
 
 def append_upload(session, media_id, path, total_bytes):
-    # Upload media chunks (/i/media/upload.json?command=APPEND)
+    """
+    Uploads a media file to `/1.1/media/upload.json`.
+
+    :param requests.Session() session: session to use
+    :param str media_id: media ID to append to
+    :param str path: path to the media file
+    :param int total_bytes: total bytes of the media file
+    """
     sent = 0
     seg_id = 0
 
@@ -269,7 +351,13 @@ def append_upload(session, media_id, path, total_bytes):
 
 
 def finalize_upload(session, headers, media_id):
-    # Finalize upload (/i/media/upload.json?command=FINALIZE)
+    """
+    Finalizes upload of a media file to `/1.1/media/upload.json`.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str media_id: media ID to finalize
+    """
     req_body = {"command": "FINALIZE", "media_id": media_id}
     res = session.post(UPLOAD_ENDPOINT, headers=headers, params=req_body, timeout=3)
 
@@ -284,7 +372,13 @@ def finalize_upload(session, headers, media_id):
 
 
 def upload_status(session, headers, media_id):
-    # Poll upload status (/i/media/upload.json?command=STATUS)
+    """
+    Polls upload status of a media file to `/1.1/media/upload.json` until the file is fully processed.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str media_id: media ID to check status for
+    """
     while True:
         print(f"\t[+] Checking uploaded media '{media_id}' status... ", end="")
 
@@ -304,7 +398,13 @@ def upload_status(session, headers, media_id):
 
 
 def like(session, headers, post_id):
-    # Like an existing post (/i/api/graphql/lI07N6Otwv1PhnEgXILM7A/FavoriteTweet)
+    """
+    Likes an existing post in `/i/api/graphql/lI07N6Otwv1PhnEgXILM7A/FavoriteTweet`.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str post_id: post ID to like
+    """
     req_body = {"queryId": "lI07N6Otwv1PhnEgXILM7A", "variables": {"tweet_id": post_id}}
     res = session.post(LIKE_ENDPOINT, headers=headers, json=req_body, timeout=3)
 
@@ -316,7 +416,13 @@ def like(session, headers, post_id):
 
 
 def repost(session, headers, post_id):
-    # Repost a post (/i/api/graphql/ojPdsZsimiJrUGLR1sjUtA/CreateRetweet)
+    """
+    Reposts an existing post in `/i/api/graphql/ojPdsZsimiJrUGLR1sjUtA/CreateRetweet`.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str post_id: post ID to repost
+    """
     req_body = {"queryId": "ojPdsZsimiJrUGLR1sjUtA", "variables": {"dark_request": False, "tweet_id": post_id}}
     res = session.post(REPOST_ENDPOINT, headers=headers, json=req_body, timeout=3)
 
@@ -330,7 +436,13 @@ def repost(session, headers, post_id):
 
 
 def delete(session, headers, post_id):
-    # Delete post (/i/api/graphql/VaenaVgh5q5ih7kvyVjgtg/DeleteTweet)
+    """
+    Deletes an existing post in `/i/api/graphql/VaenaVgh5q5ih7kvyVjgtg/DeleteTweet`.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str post_id: post ID to delete
+    """
     req_body = {"queryId": "VaenaVgh5q5ih7kvyVjgtg", "variables": {"dark_request": False, "tweet_id": post_id}}
     res = session.post(DELETE_ENDPOINT, headers=headers, json=req_body, timeout=3)
 
@@ -342,10 +454,14 @@ def delete(session, headers, post_id):
 
 
 def follow(session, headers, screen_name):
-    # Follow user (/i/api/1.1/friendships/create.json)
+    """
+    Follows a user in `/i/api/1.1/friendships/create.json`.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str screen_name: screen name to follow
+    """
     user_id = uid(session, headers, screen_name)
-    # req_url = f"{FOLLOW_ENDPOINT}?user_id={user_id}"
-    # res = session.post(req_url, headers=headers, timeout=3)
     req_body = {"user_id": user_id}
     res = session.post(FOLLOW_ENDPOINT, headers=headers, params=req_body, timeout=3)
 
@@ -357,7 +473,13 @@ def follow(session, headers, screen_name):
 
 
 def unfollow(session, headers, screen_name):
-    # Unfollow user (/i/api/1.1/friendships/destroy.json)
+    """
+    Unfollows a user in `/i/api/1.1/friendships/destroy.json`.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str screen_name: screen name to unfollow
+    """
     user_id = uid(session, headers, screen_name)
     req_body = {"user_id": user_id}
     res = session.post(UNFOLLOW_ENDPOINT, headers=headers, params=req_body, timeout=3)
@@ -370,7 +492,16 @@ def unfollow(session, headers, screen_name):
 
 
 def uid(session, headers, screen_name):
-    # Fetch UID with screen name (/i/api/graphql/_pnlqeTOtnpbIL9o-fS_pg/ProfileSpotlightsQuery)
+    """
+    Fetches a UID for a given screen name in `/i/api/graphql/_pnlqeTOtnpbIL9o-fS_pg/ProfileSpotlightsQuery`.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    :param str screen_name: screen name to fetch UID for
+
+    :returns:
+        - str - UID for a given screen name
+    """
     req_url = f"{USER_ENDPOINT}?variables=%7B%22screen_name%22%3A%22{screen_name}%22%7D"
     res = session.get(req_url, headers=headers, timeout=3)
 
@@ -387,6 +518,66 @@ def uid(session, headers, screen_name):
     print(f"[+] Found matching UID '{user_id}' for user '{screen_name}'")
 
     return user_id
+
+
+def persist(session, headers):
+    """
+    Stores cookies and headers to `./data/` directory for peristence.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+    """
+    with open("./data/cookies.json", "w", encoding="utf-8") as f:
+        json.dump(requests.utils.dict_from_cookiejar(session.cookies), f, indent=4)
+
+    with open("./data/headers.json", "w", encoding="utf-8") as f:
+        json.dump(headers, f, indent=4)
+
+    print("[+] Stored cookies and headers to './data/'")
+
+
+def try_restore():
+    """
+    Tries to restore a session from `./data/` directory.
+
+    :returns:
+        - session (requests.Session()) - None if session is not valid anymore
+        - headers (dict) - None if session is not valid anymore
+    """
+    session = requests.Session()
+
+    if os.path.isfile(f"{STORE_PATH_PREFIX}cookies.json") and os.path.isfile(f"{STORE_PATH_PREFIX}headers.json"):
+        with open(f"{STORE_PATH_PREFIX}cookies.json", "r", encoding="utf-8") as f:
+            cookies = requests.utils.cookiejar_from_dict(json.load(f))
+            session.cookies.update(cookies)
+
+        with open(f"{STORE_PATH_PREFIX}headers.json", "r", encoding="utf-8") as f:
+            headers = json.load(f)
+
+        if claims(session, headers):
+            return session, headers
+
+    return None
+
+
+def claims(session, headers):
+    """
+    Checks whether restored session is still valid by fetching claims from `/i/api/graphql/lFi3xnx0auUUnyG4YwpCNw/GetUserClaims`.
+
+    :param requests.Session() session: session to use
+    :param dict headers: headers to use
+
+    :returns:
+        - bool - True if session is valid, False otherwise
+    """
+    res = session.get(CLAIMS_ENDPOINT, headers=headers, timeout=3)
+
+    try:
+        res.json()["data"]["viewer_v2"]["claims"]
+    except JSONDecodeError:
+        return False
+
+    return True
 
 
 if __name__ == "__main__":

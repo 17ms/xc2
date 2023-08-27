@@ -1,3 +1,5 @@
+![Script functionality showcase](./.github/docs/showcase.png)
+
 ```
 usage: xc2.py [-h] [-p POST] [-m MEDIA] [-l LIKE] [-r REPOST] [-d DELETE] [-f FOLLOW] [-u UNFOLLOW]
 
